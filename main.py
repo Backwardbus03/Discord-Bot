@@ -1,7 +1,7 @@
 import os
 import random
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
 import discord
@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-from test import fetch_upcoming_contests
+from test import fetch_upcoming_contests, fetch_contests
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -22,6 +22,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot.remove_command('help') # Remove default help command to use custom!
 
 class ContestSelect(discord.ui.Select):
     def __init__(self, contests):
@@ -80,8 +81,12 @@ class ContestView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!commands"))
+    
     if not check_reminders.is_running():
         check_reminders.start()
+    if not daily_notify.is_running():
+        daily_notify.start()
 
 @tasks.loop(minutes=1)
 async def check_reminders():
@@ -112,6 +117,34 @@ async def check_reminders():
         except Exception as e:
             print(f"Error processing reminder {r_id}: {e}")
 
+@tasks.loop(time=time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
+async def daily_notify():
+    loop = asyncio.get_running_loop()
+    contests = await loop.run_in_executor(None, fetch_contests)
+    
+    if not contests:
+        return
+        
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name='notify')
+        if channel:
+            embed = discord.Embed(
+                title="🏆 Today's Contests",
+                description="Here are the contests scheduled for today. Select a contest from the dropdown below to set a reminder!",
+                color=discord.Color.green()
+            )
+            for c in contests[:10]:
+                try:
+                    start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
+                except Exception:
+                    start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+                start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
+                display_time = start_ist.strftime("%I:%M %p IST")
+                embed.add_field(name=c["event"], value=f"**{c['resource']}** at {display_time}", inline=False)
+            
+            view = ContestView(contests)
+            await channel.send(embed=embed, view=view)
+
 @bot.command(name='remind')
 async def remind_command(ctx):
     msg = await ctx.send("Fetching upcoming contests...")
@@ -125,9 +158,30 @@ async def remind_command(ctx):
     view = ContestView(contests)
     await msg.edit(content="Select a contest to be reminded about:", view=view)
 
+@bot.command(name='commands', aliases=['help'])
+async def commands_command(ctx):
+    embed = discord.Embed(
+        title="🤖 Bot Commands",
+        description="Here is the list of commands you can use:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="`!remind`", value="Shows upcoming contests and lets you set a 30-minute reminder.", inline=False)
+    embed.add_field(name="`!commands` / `!help`", value="Shows this help message.", inline=False)
+    embed.add_field(name="`!roll [sides]`", value="Rolls a die with the specified number of sides (defaults to 6).", inline=False)
+    
+    await ctx.send(embed=embed)
+
 @bot.command(name='roll')
-async def roll_die(ctx, die_sides):
-    response = random.randint(1, int(die_sides) + 1)
-    await ctx.send(response)
+async def roll_die(ctx, die_sides: int = 6):
+    if die_sides <= 0:
+        await ctx.send("Please provide a valid number of sides greater than 0.")
+        return
+    response = random.randint(1, die_sides)
+    await ctx.send(f"🎲 You rolled a **{response}**!")
+
+@roll_die.error
+async def roll_error(ctx, error):
+    if isinstance(error, commands.BadArgument):
+        await ctx.send("Please provide a valid integer for the number of sides (e.g., `!roll 6`).")
 
 bot.run(TOKEN)
