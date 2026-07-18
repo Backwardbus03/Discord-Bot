@@ -18,3 +18,4 @@ requests==2.33.1
 urllib3==2.6.3
 yarl==1.23.0
 tzdata
+supabase

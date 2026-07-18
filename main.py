@@ -1,6 +1,5 @@
 import os
 import random
-import sqlite3
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -8,32 +7,21 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 from test import fetch_upcoming_contests
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Database setup
-def setup_db():
-    conn = sqlite3.connect('reminders.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            contest_name TEXT,
-            start_time TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-setup_db()
 
 class ContestSelect(discord.ui.Select):
     def __init__(self, contests):
@@ -66,14 +54,11 @@ class ContestSelect(discord.ui.Select):
         selected_id = self.values[0]
         c = self.contests_map[selected_id]
         
-        conn = sqlite3.connect('reminders.db')
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO reminders (user_id, contest_name, start_time) VALUES (?, ?, ?)",
-            (interaction.user.id, c["event"], c["start"])
-        )
-        conn.commit()
-        conn.close()
+        supabase.table("reminders").insert({
+            "user_id": interaction.user.id,
+            "contest_name": c["event"],
+            "start_time": c["start"]
+        }).execute()
         
         try:
             start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
@@ -100,16 +85,17 @@ async def on_ready():
 
 @tasks.loop(minutes=1)
 async def check_reminders():
-    conn = sqlite3.connect('reminders.db')
-    cursor = conn.cursor()
-    
     now_utc = datetime.now(ZoneInfo("UTC"))
     target_time_utc = now_utc + timedelta(minutes=30)
     
-    cursor.execute("SELECT id, user_id, contest_name, start_time FROM reminders")
-    reminders = cursor.fetchall()
+    response = supabase.table("reminders").select("*").execute()
+    reminders = response.data
     
-    for r_id, user_id, contest_name, start_time_str in reminders:
+    for r in reminders:
+        r_id = r["id"]
+        user_id = r["user_id"]
+        contest_name = r["contest_name"]
+        start_time_str = r["start_time"]
         try:
             try:
                 start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=ZoneInfo("UTC"))
@@ -122,12 +108,9 @@ async def check_reminders():
                     start_time_ist = start_time.astimezone(ZoneInfo("Asia/Kolkata"))
                     await user.send(f"🔔 **Reminder:** {contest_name} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})")
                 
-                cursor.execute("DELETE FROM reminders WHERE id = ?", (r_id,))
-                conn.commit()
+                supabase.table("reminders").delete().eq("id", r_id).execute()
         except Exception as e:
             print(f"Error processing reminder {r_id}: {e}")
-            
-    conn.close()
 
 @bot.command(name='remind')
 async def remind_command(ctx):
