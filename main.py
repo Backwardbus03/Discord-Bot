@@ -55,6 +55,15 @@ class ContestSelect(discord.ui.Select):
         selected_id = self.values[0]
         c = self.contests_map[selected_id]
         
+        # Check if reminder already exists
+        existing = supabase.table("reminders").select("*").eq("user_id", interaction.user.id).eq("contest_name", c["event"]).execute()
+        if existing.data:
+            await interaction.response.send_message(
+                f"You already have a reminder set for **{c['event']}**!",
+                ephemeral=True
+            )
+            return
+            
         supabase.table("reminders").insert({
             "user_id": interaction.user.id,
             "contest_name": c["event"],
@@ -90,32 +99,50 @@ async def on_ready():
 
 @tasks.loop(minutes=1)
 async def check_reminders():
-    now_utc = datetime.now(ZoneInfo("UTC"))
-    target_time_utc = now_utc + timedelta(minutes=30)
-    
-    response = supabase.table("reminders").select("*").execute()
-    reminders = response.data
-    
-    for r in reminders:
-        r_id = r["id"]
-        user_id = r["user_id"]
-        contest_name = r["contest_name"]
-        start_time_str = r["start_time"]
-        try:
+    try:
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        target_time_utc = now_utc + timedelta(minutes=30)
+        
+        response = supabase.table("reminders").select("*").execute()
+        reminders = response.data
+        
+        for r in reminders:
+            r_id = r["id"]
+            user_id = r["user_id"]
+            contest_name = r["contest_name"]
+            start_time_str = r["start_time"]
             try:
-                start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=ZoneInfo("UTC"))
-            except Exception:
-                start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-                
-            if start_time <= target_time_utc:
-                user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-                if user:
-                    start_time_ist = start_time.astimezone(ZoneInfo("Asia/Kolkata"))
-                    await user.send(f"🔔 **Reminder:** {contest_name} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})")
-                
-                supabase.table("reminders").delete().eq("id", r_id).execute()
-        except Exception as e:
-            print(f"Error processing reminder {r_id}: {e}")
+                try:
+                    start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=ZoneInfo("UTC"))
+                except Exception:
+                    start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+                    
+                if start_time <= target_time_utc:
+                    # Check if contest is way in the past (stale reminder)
+                    if start_time < now_utc - timedelta(hours=2):
+                        # Bot was offline for a long time, skip sending this stale DM
+                        supabase.table("reminders").delete().eq("id", r_id).execute()
+                        continue
+                        
+                    is_past = start_time <= now_utc
+                    user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+                    if user:
+                        start_time_ist = start_time.astimezone(ZoneInfo("Asia/Kolkata"))
+                        try:
+                            if is_past:
+                                await user.send(f"🔔 **Reminder:** {contest_name} has already started! (at {start_time_ist.strftime('%I:%M %p IST')})")
+                            else:
+                                await user.send(f"🔔 **Reminder:** {contest_name} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})")
+                        except discord.Forbidden:
+                            print(f"Could not send DM to {user_id}. They might have DMs disabled.")
+                        except Exception as e:
+                            print(f"Failed to send DM to {user_id}: {e}")
+                    
+                    supabase.table("reminders").delete().eq("id", r_id).execute()
+            except Exception as e:
+                print(f"Error processing reminder {r_id}: {e}")
+    except Exception as e:
+        print(f"Error in check_reminders task: {e}")
 
 @tasks.loop(time=time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
 async def daily_notify():
