@@ -145,7 +145,7 @@ async def check_reminders():
         print(f"Error in check_reminders task: {e}")
 
 @tasks.loop(time=time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
-async def daily_notify():
+async def daily_notify(ctx):
     loop = asyncio.get_running_loop()
     contests = await loop.run_in_executor(None, fetch_contests)
     
@@ -155,6 +155,7 @@ async def daily_notify():
     for guild in bot.guilds:
         channel = discord.utils.get(guild.text_channels, name='notify')
         if channel:
+            await ctx.send("@everyone")
             embed = discord.Embed(
                 title="🏆 Today's Contests",
                 description="Here are the contests scheduled for today. Select a contest from the dropdown below to set a reminder!",
