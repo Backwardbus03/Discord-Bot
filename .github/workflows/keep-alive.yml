@@ -1,11 +1,13 @@
-name: keep-alive.yml
+name: Keep Render Awake
+
 on:
   schedule:
     - cron: '*/10 * * * *'  # every 10 minutes
-    workflow_dispatch:
+  workflow_dispatch:
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render service
-        run: curl -s https://discord-bot-wzh8.onrender.com
+        run: curl -s https://discord-bot-xyz.onrender.com
