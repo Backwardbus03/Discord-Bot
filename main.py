@@ -10,8 +10,23 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 
 from test import fetch_upcoming_contests, fetch_contests
+from flask import Flask
+from threading import Thread
 
+app = Flask('')
 load_dotenv()
+
+@app.route('/')
+def home():
+    return "Bot is alive"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
 TOKEN = os.getenv('DISCORD_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
@@ -212,4 +227,5 @@ async def roll_error(ctx, error):
     if isinstance(error, commands.BadArgument):
         await ctx.send("Please provide a valid integer for the number of sides (e.g., `!roll 6`).")
 
+keep_alive()
 bot.run(TOKEN)
