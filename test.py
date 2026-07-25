@@ -33,9 +33,15 @@ def fetch_contests():
         "limit": 100,  # Safe limit to get all contests for today across platforms
     }
 
+    headers = {
+        "User-Agent": "DiscordBot/1.0 (https://github.com)",
+        "Authorization": f"ApiKey {CLIST_USERNAME}:{CLIST_API}"
+    }
+
     try:
         response = requests.get(
             "https://clist.by/api/v4/json/contest/",
+            headers=headers,
             params=params,
             timeout=10
         )
@@ -44,6 +50,9 @@ def fetch_contests():
         print(f"+ Fetched {len(contests)} contests starting today")
         return contests
 
+    except requests.exceptions.HTTPError as e:
+        print(f"- HTTP error fetching contests: {e.response.status_code} - {e.response.text}")
+        return []
     except Exception as e:
         print(f"- Failed to fetch contests — {e}")
         return []
@@ -64,9 +73,15 @@ def fetch_upcoming_contests():
         "limit": 25,
     }
 
+    headers = {
+        "User-Agent": "DiscordBot/1.0 (https://github.com)",
+        "Authorization": f"ApiKey {CLIST_USERNAME}:{CLIST_API}"
+    }
+
     try:
         response = requests.get(
             "https://clist.by/api/v4/json/contest/",
+            headers=headers,
             params=params,
             timeout=10
         )
@@ -74,6 +89,9 @@ def fetch_upcoming_contests():
         contests = response.json().get("objects", [])
         print(f"+ Fetched {len(contests)} upcoming contests")
         return contests
+    except requests.exceptions.HTTPError as e:
+        print(f"- HTTP error fetching upcoming contests: {e.response.status_code} - {e.response.text}")
+        return []
     except Exception as e:
         print(f"- Failed to fetch upcoming contests — {e}")
         return []
