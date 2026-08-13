@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
-import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -14,14 +13,13 @@ from flask import Flask
 from threading import Thread
 
 app = Flask('')
-load_dotenv()
 
 @app.route('/')
 def home():
     return "Bot is alive"
 
 def run_web():
-    app.run(host='0.0.0.0', port=8080)
+    app.run('0.0.0.0', 8080)
 
 def keep_alive():
     t = Thread(target=run_web)
@@ -32,9 +30,7 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-intents = discord.Intents.default()
-intents.message_content = True
+#Removed intents to speed up the code as it was useless
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help') # Remove default help command to use custom!
@@ -104,7 +100,7 @@ class ContestView(discord.ui.View):
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
+    print(f'{bot.body} has connected to Discord!')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="!commands"))
     
     if not check_reminders.is_running():
