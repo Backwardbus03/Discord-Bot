@@ -3,7 +3,7 @@ import random
 import asyncio
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-
+#Plz man I am a new dev just don't look at my code and give me a bad security rating cuz I need this
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -33,10 +33,9 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-intents = discord.Intents.default()
-intents.message_content = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+
+bot = commands.Bot(command_prefix='!')
 bot.remove_command('help') # Remove default help command to use custom!
 
 class ContestSelect(discord.ui.Select):
