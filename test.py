@@ -13,7 +13,9 @@ PLATFORM_IDS = {
     "leetcode.com": 102,
     "codeforces.com": 1,
     "codechef.com": 2,
+    "atcoder.jp": 93,
 }
+
 
 def fetch_contests():
     # Define the time window for "today" in local timezone
@@ -96,8 +98,12 @@ def fetch_upcoming_contests():
         print(f"- Failed to fetch upcoming contests — {e}")
         return []
 
+
 if __name__ == "__main__":
     contests = fetch_upcoming_contests()
+    i = 0
     for c in contests:
-        print(c["event"], "|", c["start"], "|", c["resource"])
-
+        if i == 3: break
+        for key in c.keys():
+            print(f"{key}: {c[key]}")
+        i += 1
