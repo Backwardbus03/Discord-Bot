@@ -31,9 +31,9 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-TOKEN = os.getenv('DISCORD_TOKEN')
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+TOKEN = os.environ.get('DISCORD_TOKEN')
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
