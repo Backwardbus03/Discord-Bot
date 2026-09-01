@@ -31,9 +31,19 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-TOKEN = os.environ.get('DISCORD_TOKEN')
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+TOKEN = os.environ.get("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN environment variable is not set")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL environment variable is not set")
+
+if not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_KEY environment variable is not set")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
