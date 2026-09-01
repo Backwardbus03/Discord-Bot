@@ -19,3 +19,4 @@ urllib3==2.6.3
 yarl==1.23.0
 tzdata
 supabase
+flask
