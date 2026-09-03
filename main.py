@@ -8,7 +8,6 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from supabase import create_client, Client
-
 from test import fetch_upcoming_contests, fetch_contests
 from flask import Flask
 from threading import Thread
