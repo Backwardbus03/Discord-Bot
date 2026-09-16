@@ -68,39 +68,67 @@ class ContestSelect(discord.ui.Select):
             start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
             display_time = start_ist.strftime("%d %b, %I:%M %p")
 
-            label = c["event"]
+            label = (c.get("event") or "").strip()
+            if not label:
+                label = f"{c.get('resource', 'Unknown')} Contest"
             if len(label) > 100:
                 label = label[:97] + "..."
 
+            description = f"{c.get('resource', '')} | {display_time}".strip()
+            if len(description) > 100:
+                description = description[:97] + "..."
+
+            val = str(c.get("id", ""))[:100]
+            if not val:
+                continue
+
             options.append(discord.SelectOption(
                 label=label,
-                description=f"{c['resource']} | {display_time}",
-                value=str(c["id"])
+                description=description,
+                value=val
             ))
-            self.contests_map[str(c["id"])] = c
+            self.contests_map[val] = c
+
+        if not options:
+            options.append(discord.SelectOption(
+                label="No contests available",
+                value="none"
+            ))
 
         super().__init__(placeholder="Choose a contest...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         selected_id = self.values[0]
+        if selected_id == "none" or selected_id not in self.contests_map:
+            await interaction.response.send_message("No valid contest selected.", ephemeral=True)
+            return
+
         c = self.contests_map[selected_id]
 
-        # Check if reminder already exists
-        existing = supabase.table("reminders").select("*").eq("user_id", interaction.user.id).eq("contest_name",
-                                                                                                 c["event"]).execute()
-        if existing.data:
+        try:
+            # Check if reminder already exists
+            existing = supabase.table("reminders").select("*").eq("user_id", interaction.user.id).eq("contest_name",
+                                                                                                     c["event"]).execute()
+            if existing.data:
+                await interaction.response.send_message(
+                    f"You already have a reminder set for **{c['event']}**!",
+                    ephemeral=True
+                )
+                return
+
+            supabase.table("reminders").insert({
+                "user_id": interaction.user.id,
+                "contest_name": c["event"],
+                "start_time": c["start"],
+                "href": c["href"],
+            }).execute()
+        except Exception as e:
+            print(f"Error saving reminder to Supabase: {e}")
             await interaction.response.send_message(
-                f"You already have a reminder set for **{c['event']}**!",
+                "⚠️ Database is temporarily unavailable. Please try again in a few minutes.",
                 ephemeral=True
             )
             return
-
-        supabase.table("reminders").insert({
-            "user_id": interaction.user.id,
-            "contest_name": c["event"],
-            "start_time": c["start"],
-            "href": c["href"],
-        }).execute()
 
         try:
             start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
@@ -206,7 +234,11 @@ async def check_reminders():
             except Exception as e:
                 print(f"Error processing reminder {r_id}: {e}")
     except Exception as e:
-        print(f"Error in check_reminders task: {e}")
+        err_str = str(e)
+        if "521" in err_str or "Web server is down" in err_str:
+            print("Error in check_reminders task: Supabase server is unreachable (HTTP 521: Web server is down / paused / maintenance).")
+        else:
+            print(f"Error in check_reminders task: {err_str[:250]}")
 
 
 @tasks.loop(time=time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
@@ -233,7 +265,11 @@ async def daily_notify():
                     start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
                 start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
                 display_time = start_ist.strftime("%I:%M %p IST")
-                embed.add_field(name=c["event"], value=f"**{c['href']}** at {display_time}", inline=False)
+                event_name = (c.get("event") or "").strip() or f"{c.get('resource', 'Unknown')} Contest"
+                if len(event_name) > 256:
+                    event_name = event_name[:253] + "..."
+                href_val = c.get("href", "")
+                embed.add_field(name=event_name, value=f"**{href_val}** at {display_time}", inline=False)
 
             view = ContestView(contests)
             await channel.send(embed=embed, view=view)
@@ -284,5 +320,6 @@ async def roll_error(ctx, error):
         await ctx.send("Please provide a valid integer for the number of sides (e.g., `!roll 6`).")
 
 
-keep_alive()
-bot.run(TOKEN)
+if __name__ == '__main__':
+    keep_alive()
+    bot.run(TOKEN)

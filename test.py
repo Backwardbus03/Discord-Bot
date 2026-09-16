@@ -17,6 +17,34 @@ PLATFORM_IDS = {
 }
 
 
+def sanitize_contests(contests):
+    cleaned = []
+    for c in contests:
+        if not isinstance(c, dict):
+            continue
+        href = (c.get("href") or "").strip()
+        event = (c.get("event") or "").strip()
+
+        # Handle CLIST HTML artifact where href has `">Title`
+        if '">' in href:
+            url_part, text_part = href.split('">', 1)
+            c["href"] = url_part.strip()
+            if not event:
+                event = text_part.strip()
+
+        if not event:
+            # Fallback to slug from URL or generic name
+            slug = c.get("href", "").rstrip("/").split("/")[-1]
+            if slug and slug not in ("contests", "contest") and not slug.startswith("http"):
+                event = slug.replace("-", " ").replace("_", " ").title()
+            else:
+                event = f"{c.get('resource', 'Unknown')} Contest"
+
+        c["event"] = event
+        cleaned.append(c)
+    return cleaned
+
+
 def fetch_contests():
     # Define the time window for "today" in local timezone
     local_now = datetime.now().astimezone()
@@ -49,6 +77,7 @@ def fetch_contests():
         )
         response.raise_for_status()
         contests = response.json().get("objects", [])
+        contests = sanitize_contests(contests)
         print(f"+ Fetched {len(contests)} contests starting today")
         return contests
 
@@ -89,6 +118,7 @@ def fetch_upcoming_contests():
         )
         response.raise_for_status()
         contests = response.json().get("objects", [])
+        contests = sanitize_contests(contests)
         print(f"+ Fetched {len(contests)} upcoming contests")
         return contests
     except requests.exceptions.HTTPError as e:
