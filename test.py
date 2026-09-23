@@ -1,5 +1,6 @@
 import requests
 import os
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -15,6 +16,13 @@ PLATFORM_IDS = {
     "codechef.com": 2,
     "atcoder.jp": 93,
 }
+
+# In-memory cache to prevent exhausting Clist API rate limits
+_CACHE = {
+    "contests": {"data": None, "timestamp": 0},
+    "upcoming": {"data": None, "timestamp": 0},
+}
+CACHE_TTL = 180  # Cache for 3 minutes (180 seconds)
 
 
 def sanitize_contests(contests):
@@ -45,7 +53,13 @@ def sanitize_contests(contests):
     return cleaned
 
 
-def fetch_contests():
+def fetch_contests(force_refresh=False):
+    now = time.time()
+    if not force_refresh and _CACHE["contests"]["data"] is not None:
+        if now - _CACHE["contests"]["timestamp"] < CACHE_TTL:
+            print("[Cache] Serving cached today's contests")
+            return _CACHE["contests"]["data"]
+
     # Define the time window for "today" in local timezone
     local_now = datetime.now().astimezone()
     local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -75,21 +89,32 @@ def fetch_contests():
             params=params,
             timeout=10
         )
+        if response.status_code == 429:
+            print("- Rate limited by Clist API (HTTP 429). Using cached data if available.")
+            if _CACHE["contests"]["data"] is not None:
+                return _CACHE["contests"]["data"]
         response.raise_for_status()
         contests = response.json().get("objects", [])
         contests = sanitize_contests(contests)
+        _CACHE["contests"] = {"data": contests, "timestamp": now}
         print(f"+ Fetched {len(contests)} contests starting today")
         return contests
 
     except requests.exceptions.HTTPError as e:
         print(f"- HTTP error fetching contests: {e.response.status_code} - {e.response.text}")
-        return []
+        return _CACHE["contests"]["data"] or []
     except Exception as e:
         print(f"- Failed to fetch contests — {e}")
-        return []
+        return _CACHE["contests"]["data"] or []
 
 
-def fetch_upcoming_contests():
+def fetch_upcoming_contests(force_refresh=False):
+    now = time.time()
+    if not force_refresh and _CACHE["upcoming"]["data"] is not None:
+        if now - _CACHE["upcoming"]["timestamp"] < CACHE_TTL:
+            print("[Cache] Serving cached upcoming contests")
+            return _CACHE["upcoming"]["data"]
+
     from zoneinfo import ZoneInfo
     local_now = datetime.now(ZoneInfo("Asia/Kolkata"))
 
@@ -116,17 +141,22 @@ def fetch_upcoming_contests():
             params=params,
             timeout=10
         )
+        if response.status_code == 429:
+            print("- Rate limited by Clist API (HTTP 429). Using cached data if available.")
+            if _CACHE["upcoming"]["data"] is not None:
+                return _CACHE["upcoming"]["data"]
         response.raise_for_status()
         contests = response.json().get("objects", [])
         contests = sanitize_contests(contests)
+        _CACHE["upcoming"] = {"data": contests, "timestamp": now}
         print(f"+ Fetched {len(contests)} upcoming contests")
         return contests
     except requests.exceptions.HTTPError as e:
         print(f"- HTTP error fetching upcoming contests: {e.response.status_code} - {e.response.text}")
-        return []
+        return _CACHE["upcoming"]["data"] or []
     except Exception as e:
         print(f"- Failed to fetch upcoming contests — {e}")
-        return []
+        return _CACHE["upcoming"]["data"] or []
 
 
 if __name__ == "__main__":

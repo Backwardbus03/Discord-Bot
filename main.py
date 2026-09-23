@@ -1,7 +1,9 @@
 import os
 import random
 import asyncio
-from datetime import datetime, timedelta, time
+import logging
+import time as pytime
+from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
 import discord
@@ -12,6 +14,11 @@ from supabase import create_client, Client
 from test import fetch_upcoming_contests, fetch_contests
 from flask import Flask
 from threading import Thread
+
+# Setup logging to monitor Discord API rate limit events
+logging.basicConfig(level=logging.INFO)
+discord_http_logger = logging.getLogger("discord.http")
+discord_http_logger.setLevel(logging.INFO)
 
 app = Flask('')
 load_dotenv()
@@ -52,6 +59,10 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help')  # Remove default help command to use custom!
+
+# Rate limiting for UI interactions (dropdown selects)
+_USER_INTERACTION_COOLDOWNS = {}
+INTERACTION_COOLDOWN_SECONDS = 3.0
 
 
 class ContestSelect(discord.ui.Select):
@@ -98,6 +109,18 @@ class ContestSelect(discord.ui.Select):
         super().__init__(placeholder="Choose a contest...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        now = pytime.time()
+        last_time = _USER_INTERACTION_COOLDOWNS.get(user_id, 0)
+        if now - last_time < INTERACTION_COOLDOWN_SECONDS:
+            remaining = INTERACTION_COOLDOWN_SECONDS - (now - last_time)
+            await interaction.response.send_message(
+                f"⏳ You are selecting too quickly! Please wait {remaining:.1f}s before choosing again.",
+                ephemeral=True
+            )
+            return
+        _USER_INTERACTION_COOLDOWNS[user_id] = now
+
         selected_id = self.values[0]
         if selected_id == "none" or selected_id not in self.contests_map:
             await interaction.response.send_message("No valid contest selected.", ephemeral=True)
@@ -174,6 +197,8 @@ async def send_link():
 
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name='notify')
+            if not channel:
+                continue
             for c in contests:
                 try:
                     start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
@@ -181,7 +206,16 @@ async def send_link():
                     start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
 
                 if target_time_utc == start_utc:
-                    await channel.send(f"🔔 **Reminder:** {c['href']} has already started!")
+                    try:
+                        await channel.send(f"🔔 **Reminder:** {c['href']} has already started!")
+                        # Pacing outbound messages to avoid burst channel rate limits
+                        await asyncio.sleep(0.5)
+                    except discord.HTTPException as e:
+                        if e.status == 429:
+                            print(f"[Rate Limit] 429 encountered in send_link: {e}")
+                            await asyncio.sleep(2.0)
+                        else:
+                            print(f"Failed to send link message: {e}")
     except Exception as ex:
         print(ex)
 
@@ -225,8 +259,16 @@ async def check_reminders():
                             else:
                                 await user.send(
                                     f"🔔 **Reminder:** {contest_url} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})")
+                            # Pacing outbound DMs to respect Discord's direct message rate limits
+                            await asyncio.sleep(0.5)
                         except discord.Forbidden:
                             print(f"Could not send DM to {user_id}. They might have DMs disabled.")
+                        except discord.HTTPException as e:
+                            if e.status == 429:
+                                print(f"[Rate Limit] 429 encountered sending DM to {user_id}: {e}")
+                                await asyncio.sleep(2.0)
+                            else:
+                                print(f"Failed to send DM to {user_id}: {e}")
                         except Exception as e:
                             print(f"Failed to send DM to {user_id}: {e}")
 
@@ -241,7 +283,7 @@ async def check_reminders():
             print(f"Error in check_reminders task: {err_str[:250]}")
 
 
-@tasks.loop(time=time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
+@tasks.loop(time=dt_time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
 async def daily_notify():
     loop = asyncio.get_running_loop()
     contests = await loop.run_in_executor(None, fetch_contests)
@@ -276,6 +318,7 @@ async def daily_notify():
 
 
 @bot.command(name='remind')
+@commands.cooldown(rate=1, per=10.0, type=commands.BucketType.user)
 async def remind_command(ctx):
     msg = await ctx.send("Fetching upcoming contests...")
     loop = asyncio.get_running_loop()
@@ -290,6 +333,7 @@ async def remind_command(ctx):
 
 
 @bot.command(name='commands', aliases=['help'])
+@commands.cooldown(rate=1, per=5.0, type=commands.BucketType.channel)
 async def commands_command(ctx):
     embed = discord.Embed(
         title="🤖 Bot Commands",
@@ -306,6 +350,7 @@ async def commands_command(ctx):
 
 
 @bot.command(name='roll')
+@commands.cooldown(rate=1, per=3.0, type=commands.BucketType.user)
 async def roll_die(ctx, die_sides: int = 6):
     if die_sides <= 0:
         await ctx.send("Please provide a valid number of sides greater than 0.")
@@ -316,8 +361,28 @@ async def roll_die(ctx, die_sides: int = 6):
 
 @roll_die.error
 async def roll_error(ctx, error):
-    if isinstance(error, commands.BadArgument):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"⏳ **Cooldown Active:** Please wait {error.retry_after:.1f}s before rolling again.")
+    elif isinstance(error, commands.BadArgument):
         await ctx.send("Please provide a valid integer for the number of sides (e.g., `!roll 6`).")
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    # Check if command has a local error handler that already dealt with the error
+    if hasattr(ctx.command, 'on_error'):
+        return
+
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(
+            f"⏳ **Cooldown Active:** Please wait {error.retry_after:.1f}s before using `{ctx.prefix}{ctx.invoked_with}` again."
+        )
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # Silently ignore invalid commands
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"⚠️ Invalid arguments provided. Please check `{ctx.prefix}help` or `{ctx.prefix}commands`.")
+    else:
+        print(f"Unhandled error in command {ctx.command}: {error}")
 
 
 if __name__ == '__main__':
