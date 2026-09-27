@@ -2,6 +2,7 @@ import requests
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,8 +61,8 @@ def fetch_contests(force_refresh=False):
             print("[Cache] Serving cached today's contests")
             return _CACHE["contests"]["data"]
 
-    # Define the time window for "today" in local timezone
-    local_now = datetime.now().astimezone()
+    # Define the time window for "today" in Asia/Kolkata timezone
+    local_now = datetime.now(ZoneInfo("Asia/Kolkata"))
     local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     local_end = local_now.replace(hour=23, minute=59, second=59, microsecond=999999)
 

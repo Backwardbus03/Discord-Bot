@@ -60,6 +60,23 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 bot.remove_command('help')  # Remove default help command to use custom!
 
+def parse_contest_time(start_str):
+    if not start_str or not isinstance(start_str, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(start_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+    except Exception:
+        pass
+    return None
+
+
 # Rate limiting for UI interactions (dropdown selects)
 _USER_INTERACTION_COOLDOWNS = {}
 INTERACTION_COOLDOWN_SECONDS = 3.0
@@ -70,14 +87,16 @@ class ContestSelect(discord.ui.Select):
         options = []
         self.contests_map = {}
         for c in contests[:25]:
-            # parse start time from UTC to IST for display
-            try:
-                start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
-            except Exception:
-                start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+            val = str(c.get("id", "")).strip()[:100]
+            if not val or val in self.contests_map:
+                continue
 
-            start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
-            display_time = start_ist.strftime("%d %b, %I:%M %p")
+            start_utc = parse_contest_time(c.get("start"))
+            if start_utc:
+                start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
+                display_time = start_ist.strftime("%d %b, %I:%M %p")
+            else:
+                display_time = "TBD"
 
             label = (c.get("event") or "").strip()
             if not label:
@@ -88,10 +107,6 @@ class ContestSelect(discord.ui.Select):
             description = f"{c.get('resource', '')} | {display_time}".strip()
             if len(description) > 100:
                 description = description[:97] + "..."
-
-            val = str(c.get("id", ""))[:100]
-            if not val:
-                continue
 
             options.append(discord.SelectOption(
                 label=label,
@@ -153,15 +168,14 @@ class ContestSelect(discord.ui.Select):
             )
             return
 
-        try:
-            start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
-        except Exception:
-            start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-
-        start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
+        start_utc = parse_contest_time(c.get("start"))
+        time_text = ""
+        if start_utc:
+            start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
+            time_text = f" (Starts at {start_ist.strftime('%I:%M %p IST')})"
 
         await interaction.response.send_message(
-            f"Reminder set! I will DM you 30 minutes before **{c['event']}** (Starts at {start_ist.strftime('%I:%M %p IST')}).",
+            f"Reminder set! I will DM you 30 minutes before **{c['event']}**{time_text}.",
             ephemeral=True
         )
 
@@ -188,26 +202,31 @@ async def on_ready():
 @tasks.loop(minutes=1)
 async def send_link():
     try:
-        now_utc = datetime.now(ZoneInfo("UTC"))
+        now_utc = datetime.now(ZoneInfo("UTC")).replace(second=0, microsecond=0)
         target_time_utc = now_utc + timedelta(minutes=5)
         loop = asyncio.get_running_loop()
         contests = await loop.run_in_executor(None, fetch_contests)
 
-        if not contests: return
+        if not contests:
+            return
 
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name='notify')
             if not channel:
                 continue
-            for c in contests:
-                try:
-                    start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
-                except Exception:
-                    start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
 
-                if target_time_utc == start_utc:
+            perms = channel.permissions_for(guild.me)
+            if not perms.send_messages:
+                continue
+
+            for c in contests:
+                start_utc = parse_contest_time(c.get("start"))
+                if not start_utc:
+                    continue
+
+                if target_time_utc == start_utc.replace(second=0, microsecond=0):
                     try:
-                        await channel.send(f"🔔 **Reminder:** {c['href']} has already started!")
+                        await channel.send(f"🔔 **Reminder:** {c.get('href', '')} is starting in 5 minutes!")
                         # Pacing outbound messages to avoid burst channel rate limits
                         await asyncio.sleep(0.5)
                     except discord.HTTPException as e:
@@ -216,8 +235,20 @@ async def send_link():
                             await asyncio.sleep(2.0)
                         else:
                             print(f"Failed to send link message: {e}")
+                    except Exception as e:
+                        print(f"Failed to send link message: {e}")
     except Exception as ex:
-        print(ex)
+        print(f"Error in send_link task: {ex}")
+
+
+@send_link.before_loop
+async def before_send_link():
+    await bot.wait_until_ready()
+
+
+@send_link.error
+async def send_link_error(error):
+    print(f"Unhandled error in send_link task loop: {error}")
 
 
 @tasks.loop(minutes=1)
@@ -236,10 +267,10 @@ async def check_reminders():
             contest_url = r["href"]
             start_time_str = r["start_time"]
             try:
-                try:
-                    start_time = datetime.fromisoformat(start_time_str).replace(tzinfo=ZoneInfo("UTC"))
-                except Exception:
-                    start_time = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+                start_time = parse_contest_time(start_time_str)
+                if not start_time:
+                    supabase.table("reminders").delete().eq("id", r_id).execute()
+                    continue
 
                 if start_time <= target_time_utc:
                     # Check if contest is way in the past (stale reminder)
@@ -283,38 +314,90 @@ async def check_reminders():
             print(f"Error in check_reminders task: {err_str[:250]}")
 
 
+@check_reminders.before_loop
+async def before_check_reminders():
+    await bot.wait_until_ready()
+
+
+@check_reminders.error
+async def check_reminders_error(error):
+    print(f"Unhandled error in check_reminders task loop: {error}")
+
+
 @tasks.loop(time=dt_time(hour=2, minute=30, tzinfo=ZoneInfo("UTC")))
 async def daily_notify():
-    loop = asyncio.get_running_loop()
-    contests = await loop.run_in_executor(None, fetch_contests)
+    try:
+        loop = asyncio.get_running_loop()
+        contests = await loop.run_in_executor(None, fetch_contests)
 
-    if not contests:
-        return
+        if not contests:
+            return
 
-    for guild in bot.guilds:
-        channel = discord.utils.get(guild.text_channels, name='notify')
-        if channel:
-            await channel.send("@everyone")
-            embed = discord.Embed(
-                title="🏆 Today's Contests",
-                description="Here are the contests scheduled for today. Select a contest from the dropdown below to set a reminder!",
-                color=discord.Color.green()
-            )
-            for c in contests[:10]:
-                try:
-                    start_utc = datetime.fromisoformat(c["start"]).replace(tzinfo=ZoneInfo("UTC"))
-                except Exception:
-                    start_utc = datetime.strptime(c["start"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        embed = discord.Embed(
+            title="🏆 Today's Contests",
+            description="Here are the contests scheduled for today. Select a contest from the dropdown below to set a reminder!",
+            color=discord.Color.green()
+        )
+        for c in contests[:10]:
+            start_utc = parse_contest_time(c.get("start"))
+            if start_utc:
                 start_ist = start_utc.astimezone(ZoneInfo("Asia/Kolkata"))
                 display_time = start_ist.strftime("%I:%M %p IST")
-                event_name = (c.get("event") or "").strip() or f"{c.get('resource', 'Unknown')} Contest"
-                if len(event_name) > 256:
-                    event_name = event_name[:253] + "..."
-                href_val = c.get("href", "")
-                embed.add_field(name=event_name, value=f"**{href_val}** at {display_time}", inline=False)
+            else:
+                display_time = "TBD"
 
-            view = ContestView(contests)
-            await channel.send(embed=embed, view=view)
+            event_name = (c.get("event") or "").strip() or f"{c.get('resource', 'Unknown')} Contest"
+            if len(event_name) > 256:
+                event_name = event_name[:253] + "..."
+
+            href_val = (c.get("href") or "").strip()
+            field_val = f"**{href_val}** at {display_time}" if href_val else f"Starts at {display_time}"
+            if len(field_val) > 1024:
+                field_val = field_val[:1021] + "..."
+
+            embed.add_field(name=event_name, value=field_val, inline=False)
+
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name='notify')
+            if not channel:
+                continue
+
+            try:
+                # Check bot permissions in this channel before sending
+                perms = channel.permissions_for(guild.me)
+                if not perms.send_messages:
+                    print(f"Skipping daily notify in {guild.name}: missing 'Send Messages' permission in #{channel.name}")
+                    continue
+                if not perms.embed_links:
+                    print(f"Skipping daily notify in {guild.name}: missing 'Embed Links' permission in #{channel.name}")
+                    continue
+
+                view = ContestView(contests)
+                await channel.send(content="@everyone", embed=embed, view=view)
+                # Pacing outbound messages to avoid hitting channel rate limits
+                await asyncio.sleep(0.5)
+            except discord.Forbidden as e:
+                print(f"Permission denied sending daily notification in {guild.name} #{channel.name}: {e}")
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    print(f"[Rate Limit] 429 encountered in daily_notify for {guild.name}: {e}")
+                    await asyncio.sleep(2.0)
+                else:
+                    print(f"HTTP error sending daily notification in {guild.name} #{channel.name}: {e}")
+            except Exception as e:
+                print(f"Error sending daily notification to {guild.name}: {e}")
+    except Exception as e:
+        print(f"Error in daily_notify task: {e}")
+
+
+@daily_notify.before_loop
+async def before_daily_notify():
+    await bot.wait_until_ready()
+
+
+@daily_notify.error
+async def daily_notify_error(error):
+    print(f"Unhandled error in daily_notify task loop: {error}")
 
 
 @bot.command(name='remind')
