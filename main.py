@@ -77,6 +77,19 @@ def parse_contest_time(start_str):
     return None
 
 
+async def send_with_retry(send_factory, label, delays=(30, 120)):
+    """Run an awaitable-producing callable, retrying on HTTP 429 with the given backoff delays (seconds).
+    Re-raises the HTTPException once retries are exhausted or if the error is not a 429."""
+    for attempt in range(len(delays) + 1):
+        try:
+            return await send_factory()
+        except discord.HTTPException as e:
+            if e.status != 429 or attempt == len(delays):
+                raise
+            print(f"[Rate Limit] 429 in {label} (attempt {attempt + 1}). Retrying in {delays[attempt]}s...")
+            await asyncio.sleep(delays[attempt])
+
+
 # Rate limiting for UI interactions (dropdown selects)
 _USER_INTERACTION_COOLDOWNS = {}
 INTERACTION_COOLDOWN_SECONDS = 3.0
@@ -226,7 +239,9 @@ async def send_link():
 
                 if target_time_utc == start_utc.replace(second=0, microsecond=0):
                     try:
-                        await channel.send(f"🔔 **Reminder:** {c.get('href', '')} is starting in 5 minutes!")
+                        await send_with_retry(
+                            lambda: channel.send(f"🔔 **Reminder:** {c.get('href', '')} is starting in 5 minutes!"),
+                            "send_link", delays=(5, 15))
                         # Pacing outbound messages to avoid burst channel rate limits
                         await asyncio.sleep(0.5)
                     except discord.HTTPException as e:
@@ -281,28 +296,32 @@ async def check_reminders():
 
                     is_past = start_time <= now_utc
                     user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+                    keep_for_retry = False
                     if user:
                         start_time_ist = start_time.astimezone(ZoneInfo("Asia/Kolkata"))
                         try:
                             if is_past:
-                                await user.send(
-                                    f"🔔 **Reminder:** {contest_url} has already started! (at {start_time_ist.strftime('%I:%M %p IST')})")
+                                dm_text = f"🔔 **Reminder:** {contest_url} has already started! (at {start_time_ist.strftime('%I:%M %p IST')})"
                             else:
-                                await user.send(
-                                    f"🔔 **Reminder:** {contest_url} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})")
+                                dm_text = f"🔔 **Reminder:** {contest_url} is starting in less than 30 minutes! (at {start_time_ist.strftime('%I:%M %p IST')})"
+                            await send_with_retry(lambda: user.send(dm_text), f"DM to {user_id}", delays=(5, 15))
                             # Pacing outbound DMs to respect Discord's direct message rate limits
                             await asyncio.sleep(0.5)
                         except discord.Forbidden:
                             print(f"Could not send DM to {user_id}. They might have DMs disabled.")
                         except discord.HTTPException as e:
                             if e.status == 429:
-                                print(f"[Rate Limit] 429 encountered sending DM to {user_id}: {e}")
-                                await asyncio.sleep(2.0)
+                                # Still rate limited after retries: keep the reminder so the next run retries it
+                                print(f"[Rate Limit] 429 sending DM to {user_id}; will retry next cycle.")
+                                keep_for_retry = True
                             else:
                                 print(f"Failed to send DM to {user_id}: {e}")
                         except Exception as e:
                             print(f"Failed to send DM to {user_id}: {e}")
 
+                    if keep_for_retry:
+                        # Stop this cycle early; hammering a rate-limited API only prolongs the limit
+                        break
                     supabase.table("reminders").delete().eq("id", r_id).execute()
             except Exception as e:
                 print(f"Error processing reminder {r_id}: {e}")
@@ -373,7 +392,9 @@ async def daily_notify():
                     continue
 
                 view = ContestView(contests)
-                await channel.send(content="@everyone", embed=embed, view=view)
+                await send_with_retry(
+                    lambda: channel.send(content="@everyone", embed=embed, view=view),
+                    f"daily_notify ({guild.name})")
                 # Pacing outbound messages to avoid hitting channel rate limits
                 await asyncio.sleep(0.5)
             except discord.Forbidden as e:
@@ -465,9 +486,24 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.BadArgument):
         await ctx.send(f"⚠️ Invalid arguments provided. Please check `{ctx.prefix}help` or `{ctx.prefix}commands`.")
     else:
-        print(f"Unhandled error in command {ctx.command}: {error}")
+        original = getattr(error, "original", error)
+        if isinstance(original, discord.HTTPException) and original.status == 429:
+            # Don't dump the full Cloudflare HTML page (error 1015 = IP temporarily banned)
+            print(f"[Rate Limit] 429 in command {ctx.command}: Discord/Cloudflare is rate limiting this IP. "
+                  f"Wait for the ban to expire; avoid restarting the bot repeatedly.")
+        else:
+            print(f"Unhandled error in command {ctx.command}: {error}")
 
 
 if __name__ == '__main__':
     keep_alive()
-    bot.run(TOKEN)
+    try:
+        bot.run(TOKEN)
+    except discord.HTTPException as e:
+        if e.status == 429:
+            # IP is rate limited/banned by Cloudflare. Wait before exiting so a process manager
+            # doesn't crash-loop and extend the ban with rapid login retries.
+            print("[Rate Limit] 429 on startup (Cloudflare 1015). Sleeping 15 minutes before exiting...")
+            pytime.sleep(15 * 60)
+            os._exit(1)
+        raise
